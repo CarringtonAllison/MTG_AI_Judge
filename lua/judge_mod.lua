@@ -7,8 +7,17 @@
     - "judge <question>" chat command for rulings
     - "judge clear" to reset conversation session
     - Board state scraping (battlefield, graveyard, exile, hand)
+    - Auto-spawns scripting zones — no manual GUID setup needed
     - Session-based conversation memory for follow-up questions
     - Broadcasts rulings to all players
+
+    Setup:
+    1. Paste this into Modding → Scripting → Global
+    2. Save & Play — zones spawn automatically
+    3. Type "judge zones" to see where zones are (colored boxes)
+    4. If zones don't align with your table, adjust ZONE_POSITIONS below
+    5. Click the Judge Mat to enter your API key
+    6. Type "judge <question>" in chat
 ]]
 
 ---------------------------------------------------------------
@@ -21,55 +30,209 @@ local SERVER_URL = "http://localhost:8080/judge"
 -- Per-player API keys stored in memory (color -> key)
 local PLAYER_KEYS = {}
 
--- Zone GUIDs for "Oops I Baked a Pie" table
--- Load the table in TTS, right-click each zone, note GUID, fill in below
-local ZONE_GUIDS = {
-    White = { battlefield = "", graveyard = "", exile = "" },
-    Blue  = { battlefield = "", graveyard = "", exile = "" },
-    Red   = { battlefield = "", graveyard = "", exile = "" },
-    Green = { battlefield = "", graveyard = "", exile = "" },
+-- Map player seat colors to player keys used in the API
+-- Clockwise from White: White (bottom-right) → Red (bottom-left) → Yellow (top-left) → Blue (top-right)
+local COLOR_TO_PLAYER = {
+    White  = "player1",
+    Red    = "player2",
+    Yellow = "player3",
+    Blue   = "player4",
 }
 
--- Map player seat colors to player keys used in the API
-local COLOR_TO_PLAYER = {
-    White = "player1",
-    Blue  = "player2",
-    Red   = "player3",
-    Green = "player4",
+-- Zone positions for "Oops I Baked a Pie" 4-player table
+-- Each player has battlefield, graveyard, and exile zones
+-- Adjust these {x, y, z} positions and {scaleX, scaleY, scaleZ} sizes to match your table layout
+-- y=1 keeps zones just above the table surface
+-- Type "judge zones" in chat to visualize where they are
+local ZONE_POSITIONS = {
+    -- White = bottom-right (white border), player 1, side column on RIGHT edge
+    White = {
+        battlefield = { position = {19, 2, 15}, scale = {46, 5, 30} },
+        graveyard   = { position = {41, 2, 23}, scale = {8, 5, 6} },
+        exile       = { position = {41, 2, 14}, scale = {8, 5, 6} },
+    },
+    -- Red = bottom-left (red border), player 2, side column on LEFT edge
+    Red = {
+        battlefield = { position = {-19, 2, 15}, scale = {46, 5, 30} },
+        graveyard   = { position = {-41, 2, 23}, scale = {8, 5, 6} },
+        exile       = { position = {-41, 2, 14}, scale = {8, 5, 6} },
+    },
+    -- Yellow = top-left (yellow border), player 3, side column on LEFT edge
+    Yellow = {
+        battlefield = { position = {-19, 2, -15}, scale = {46, 5, 30} },
+        graveyard   = { position = {-41, 2, -23}, scale = {8, 5, 6} },
+        exile       = { position = {-41, 2, -14}, scale = {8, 5, 6} },
+    },
+    -- Blue = top-right (blue border), player 4, side column on RIGHT edge
+    Blue = {
+        battlefield = { position = {19, 2, -15}, scale = {46, 5, 30} },
+        graveyard   = { position = {41, 2, -23}, scale = {8, 5, 6} },
+        exile       = { position = {41, 2, -14}, scale = {8, 5, 6} },
+    },
 }
+
+-- Runtime zone object references (populated on load)
+-- { White = { battlefield = zoneObj, graveyard = zoneObj, exile = zoneObj }, ... }
+local ZONE_OBJECTS = {}
+
+-- Visual marker objects for zones (so you can see them)
+local ZONE_MARKERS = {}
+
+-- Whether zone markers are currently visible
+local showMarkers = true
 
 -- Judge Mat object reference
 local judgeMat = nil
 
 ---------------------------------------------------------------
--- JUDGE MAT UI (XML)
--- Renders a small panel on the mat with status + setup button
+-- GLOBAL UI (screen overlay for API key setup)
+-- Uses Global UI.setXml so it renders as a reliable screen popup
 ---------------------------------------------------------------
 
-local function getMatUI(playerColor)
-    local isReady = PLAYER_KEYS[playerColor] ~= nil
-    local statusText = isReady and "Ready" or "Not Connected"
-    local statusColor = isReady and "#4CAF50" or "#F44336"
-
-    return [[
-<Panel position="0 0.5 0" rotation="180 0 0" height="200" width="400">
-  <VerticalLayout padding="10 10 10 10" spacing="5">
-    <Text fontSize="24" font="Arial" color="#FFFFFF" alignment="MiddleCenter">MTG AI Judge</Text>
-    <Text fontSize="16" font="Arial" color="]] .. statusColor .. [[" alignment="MiddleCenter">]] .. statusText .. [[</Text>
-    <Button onClick="onSetupClick" fontSize="14" color="#FFFFFF" textColor="#000000">Enter API Key</Button>
-  </VerticalLayout>
-</Panel>
-<Panel id="keyInputPanel" active="false" position="0 2 0" rotation="180 0 0" height="150" width="500">
-  <VerticalLayout padding="10 10 10 10" spacing="5">
-    <Text fontSize="16" font="Arial" color="#FFFFFF" alignment="MiddleCenter">Paste your Anthropic API Key:</Text>
-    <InputField id="apiKeyInput" fontSize="14" characterLimit="200" placeholder="sk-ant-..." />
-    <HorizontalLayout spacing="10">
-      <Button onClick="onSaveKey" fontSize="14" color="#4CAF50" textColor="#FFFFFF">Save</Button>
-      <Button onClick="onCancelKey" fontSize="14" color="#F44336" textColor="#FFFFFF">Cancel</Button>
+local API_KEY_UI = [[
+<Panel id="apiKeyPanel" active="false" height="220" width="450"
+       position="0 0 0" showAnimation="FadeIn" hideAnimation="FadeOut"
+       color="rgba(30,20,40,0.95)" outline="white" outlineSize="2">
+  <VerticalLayout padding="20 20 20 20" spacing="10">
+    <Text fontSize="28" color="#FFFFFF" alignment="MiddleCenter" fontStyle="Bold">MTG AI Judge</Text>
+    <Text fontSize="16" color="#AAAAAA" alignment="MiddleCenter">Paste your Anthropic API Key below:</Text>
+    <InputField id="apiKeyInput" fontSize="16" characterLimit="200"
+                placeholder="sk-ant-..." color="#FFFFFF" textColor="#000000" />
+    <HorizontalLayout spacing="10" preferredHeight="40">
+      <Button id="saveKeyBtn" onClick="onSaveKey" fontSize="16"
+              color="#4CAF50" textColor="#FFFFFF" preferredHeight="36">Save</Button>
+      <Button id="cancelKeyBtn" onClick="onCancelKey" fontSize="16"
+              color="#F44336" textColor="#FFFFFF" preferredHeight="36">Cancel</Button>
     </HorizontalLayout>
   </VerticalLayout>
 </Panel>
 ]]
+
+function showApiKeyDialog()
+    UI.setXml(API_KEY_UI)
+    Wait.time(function()
+        UI.setAttribute("apiKeyPanel", "active", "true")
+    end, 0.3)
+end
+
+function hideApiKeyDialog()
+    UI.setAttribute("apiKeyPanel", "active", "false")
+end
+
+---------------------------------------------------------------
+-- SCRIPTING ZONE SPAWNING
+-- Auto-creates zones so the user never has to find GUIDs
+---------------------------------------------------------------
+
+-- Zone label colors so you can tell them apart
+local ZONE_COLORS = {
+    battlefield = {0.1, 0.9, 0.1, 0.4},  -- bright green, semi-transparent
+    graveyard   = {0.9, 0.2, 0.2, 0.4},  -- red, semi-transparent
+    exile       = {0.2, 0.4, 0.9, 0.4},  -- blue, semi-transparent
+}
+
+function spawnZoneMarker(zoneConfig, zoneName, playerColor)
+    -- Spawn a flat block as a visual indicator for where the zone is
+    -- BlockSquare base size is ~1.2 TTS units, so divide zone scale by 1.2 to match
+    local marker = spawnObject({
+        type = "BlockSquare",
+        position = {zoneConfig.position[1], 1.01, zoneConfig.position[3]},
+        rotation = {0, 0, 0},
+        scale = {zoneConfig.scale[1] / 1.2, 0.01, zoneConfig.scale[3] / 1.2},
+        sound = false,
+        callback_function = function(obj)
+            obj.setName("JudgeMarker_" .. playerColor .. "_" .. zoneName)
+            obj.setLock(true)
+            obj.setColorTint(ZONE_COLORS[zoneName] or {0.1, 0.9, 0.1, 0.4})
+            obj.interactable = false
+        end,
+    })
+    return marker
+end
+
+function spawnZones()
+    ZONE_OBJECTS = {}
+    ZONE_MARKERS = {}
+    local zoneCount = 0
+
+    for color, zones in pairs(ZONE_POSITIONS) do
+        ZONE_OBJECTS[color] = {}
+        ZONE_MARKERS[color] = {}
+        for zoneName, zoneConfig in pairs(zones) do
+            local zone = spawnObject({
+                type = "ScriptingTrigger",
+                position = zoneConfig.position,
+                rotation = {0, 0, 0},
+                scale = zoneConfig.scale,
+                sound = false,
+                callback_function = function(obj)
+                    obj.setName("Judge_" .. color .. "_" .. zoneName)
+                end,
+            })
+            ZONE_OBJECTS[color][zoneName] = zone
+
+            -- Spawn visual marker
+            if showMarkers then
+                ZONE_MARKERS[color][zoneName] = spawnZoneMarker(zoneConfig, zoneName, color)
+            end
+
+            zoneCount = zoneCount + 1
+        end
+    end
+
+    return zoneCount
+end
+
+function destroyAllMarkers()
+    for _, obj in ipairs(getAllObjects()) do
+        local name = obj.getName() or ""
+        if name:match("^JudgeMarker_") then
+            obj.destruct()
+        end
+    end
+    ZONE_MARKERS = {}
+end
+
+function spawnAllMarkers()
+    destroyAllMarkers()
+    for color, zones in pairs(ZONE_POSITIONS) do
+        ZONE_MARKERS[color] = {}
+        for zoneName, zoneConfig in pairs(zones) do
+            ZONE_MARKERS[color][zoneName] = spawnZoneMarker(zoneConfig, zoneName, color)
+        end
+    end
+end
+
+-- Find existing judge zones and markers (after a save/load cycle, they persist with names)
+function findExistingZones()
+    ZONE_OBJECTS = {}
+    ZONE_MARKERS = {}
+    local found = 0
+
+    for _, obj in ipairs(getAllObjects()) do
+        local name = obj.getName() or ""
+
+        -- Match zone triggers
+        local color, zoneName = name:match("^Judge_(%w+)_(%w+)$")
+        if color and zoneName and ZONE_POSITIONS[color] and ZONE_POSITIONS[color][zoneName] then
+            if not ZONE_OBJECTS[color] then
+                ZONE_OBJECTS[color] = {}
+            end
+            ZONE_OBJECTS[color][zoneName] = obj
+            found = found + 1
+        end
+
+        -- Match visual markers
+        local mColor, mZone = name:match("^JudgeMarker_(%w+)_(%w+)$")
+        if mColor and mZone then
+            if not ZONE_MARKERS[mColor] then
+                ZONE_MARKERS[mColor] = {}
+            end
+            ZONE_MARKERS[mColor][mZone] = obj
+        end
+    end
+
+    return found
 end
 
 ---------------------------------------------------------------
@@ -86,6 +249,13 @@ function onLoad(save_state)
         end
     end
 
+    -- Find or create scripting zones
+    local existingZones = findExistingZones()
+    if existingZones == 0 then
+        local count = spawnZones()
+        broadcastToAll("MTG AI Judge: Spawned " .. count .. " scripting zones. Type 'judge zones' to check positions.", {0.4, 0.7, 1.0})
+    end
+
     -- Look for existing judge mat or create one
     for _, obj in ipairs(getAllObjects()) do
         if obj.getName() == "MTG AI Judge" then
@@ -95,23 +265,23 @@ function onLoad(save_state)
     end
 
     if judgeMat == nil then
-        -- Spawn a custom tile as the judge mat
+        -- Spawn a visible block as the judge mat (bottom-center edge of table)
         judgeMat = spawnObject({
-            type = "Custom_Tile",
-            position = {0, 1.5, 0},
+            type = "BlockSquare",
+            position = {-48, 1.2, 32},
             rotation = {0, 0, 0},
-            scale = {2, 1, 2},
+            scale = {3, 0.2, 1.5},
             callback_function = function(obj)
                 obj.setName("MTG AI Judge")
-                obj.setDescription("Click to set up your API key, then type 'judge <question>' in chat")
+                obj.setDescription("Type 'judge setup' to enter your API key")
                 obj.setLock(true)
-                obj.setColorTint({0.2, 0.1, 0.3})
-                updateMatUI()
+                obj.setColorTint({0.6, 0.2, 0.8})
             end,
         })
-    else
-        Wait.time(updateMatUI, 1)
     end
+
+    -- Load the Global UI XML (hidden by default)
+    UI.setXml(API_KEY_UI)
 end
 
 function onSave()
@@ -120,30 +290,11 @@ function onSave()
 end
 
 ---------------------------------------------------------------
--- MAT UI UPDATE
+-- GLOBAL UI CALLBACKS (API key dialog)
 ---------------------------------------------------------------
-
-function updateMatUI()
-    if judgeMat == nil then return end
-    -- Default UI for first player who looks at it
-    judgeMat.UI.setXml(getMatUI(nil))
-end
-
----------------------------------------------------------------
--- MAT UI CALLBACKS
----------------------------------------------------------------
-
-function onSetupClick(player, value, id)
-    -- Show the key input panel for this player
-    if judgeMat then
-        judgeMat.UI.setAttribute("keyInputPanel", "active", "true")
-    end
-end
 
 function onSaveKey(player, value, id)
-    if judgeMat == nil then return end
-
-    local apiKey = judgeMat.UI.getAttribute("apiKeyInput", "text") or ""
+    local apiKey = UI.getAttribute("apiKeyInput", "text") or ""
     apiKey = apiKey:gsub("%s+", "")  -- trim whitespace
 
     if apiKey == "" then
@@ -154,35 +305,27 @@ function onSaveKey(player, value, id)
     -- Store key for this player's color
     PLAYER_KEYS[player.color] = apiKey
 
-    -- Hide input panel
-    judgeMat.UI.setAttribute("keyInputPanel", "active", "false")
-
-    -- Update status
-    judgeMat.UI.setXml(getMatUI(player.color))
+    -- Hide dialog
+    hideApiKeyDialog()
 
     -- Confirm privately
     printToColor("API key saved! Type 'judge' followed by your question in chat.", player.color, {0.2, 0.8, 0.2})
 end
 
 function onCancelKey(player, value, id)
-    if judgeMat then
-        judgeMat.UI.setAttribute("keyInputPanel", "active", "false")
-    end
+    hideApiKeyDialog()
 end
 
 ---------------------------------------------------------------
 -- BOARD STATE SCRAPING
 ---------------------------------------------------------------
 
--- Get card names from a scripting zone by GUID
-function getCardNamesInZone(zoneGUID)
+-- Get card names from a zone object reference
+function getCardNamesInZone(zoneObj)
     local names = {}
-    if zoneGUID == "" then return names end
+    if zoneObj == nil then return names end
 
-    local zone = getObjectFromGUID(zoneGUID)
-    if zone == nil then return names end
-
-    local objects = zone.getObjects()
+    local objects = zoneObj.getObjects()
     for _, obj in ipairs(objects) do
         if obj.type == "Card" then
             local name = obj.getName()
@@ -219,8 +362,9 @@ function scrapeBoardState()
     local board_state = {}
     local life_totals = {}
 
-    for color, zones in pairs(ZONE_GUIDS) do
+    for color, _ in pairs(ZONE_POSITIONS) do
         local playerKey = COLOR_TO_PLAYER[color]
+        local zones = ZONE_OBJECTS[color] or {}
         board_state[playerKey] = {
             battlefield = getCardNamesInZone(zones.battlefield),
             graveyard   = getCardNamesInZone(zones.graveyard),
@@ -244,10 +388,66 @@ end
 ---------------------------------------------------------------
 
 function onChat(message, sender)
+    -- Match "judge setup" command — show API key dialog
+    if message:lower():match("^judge%s+setup%s*$") then
+        showApiKeyDialog()
+        return false
+    end
+
     -- Match "judge clear" command
     if message:lower():match("^judge%s+clear%s*$") then
         printToColor("Session cleared. Your next question starts fresh.", sender.color, {0.8, 0.8, 0.2})
         return false  -- suppress from chat
+    end
+
+    -- Match "judge zones" command — show zone info for debugging
+    if message:lower():match("^judge%s+zones%s*$") then
+        printToColor("--- Zone Status ---", sender.color, {0.4, 0.7, 1.0})
+        for color, zones in pairs(ZONE_OBJECTS) do
+            for zoneName, zoneObj in pairs(zones) do
+                local pos = zoneObj.getPosition()
+                local count = #zoneObj.getObjects()
+                printToColor(
+                    color .. " " .. zoneName .. ": " .. count .. " objects (pos: " ..
+                    string.format("%.0f, %.0f, %.0f", pos.x, pos.y, pos.z) .. ")",
+                    sender.color, {0.7, 0.7, 0.7}
+                )
+            end
+        end
+        printToColor("Tip: Move cards into zones and run 'judge zones' again to verify detection.", sender.color, {0.8, 0.8, 0.2})
+        return false
+    end
+
+    -- Match "judge reset zones" — delete and respawn all zones
+    if message:lower():match("^judge%s+reset%s+zones%s*$") then
+        -- Delete existing zones and markers
+        for color, zones in pairs(ZONE_OBJECTS) do
+            for zoneName, zoneObj in pairs(zones) do
+                if zoneObj then zoneObj.destruct() end
+            end
+        end
+        ZONE_OBJECTS = {}
+        destroyAllMarkers()
+        -- Respawn
+        local count = spawnZones()
+        printToColor("Respawned " .. count .. " scripting zones.", sender.color, {0.4, 0.7, 1.0})
+        return false
+    end
+
+    -- Match "judge hide zones" — hide the colored zone markers
+    if message:lower():match("^judge%s+hide%s+zones%s*$") then
+        showMarkers = false
+        destroyAllMarkers()
+        printToColor("Zone markers hidden. Type 'judge show zones' to show them again.", sender.color, {0.4, 0.7, 1.0})
+        return false
+    end
+
+    -- Match "judge show zones" — show the colored zone markers
+    if message:lower():match("^judge%s+show%s+zones%s*$") then
+        showMarkers = true
+        spawnAllMarkers()
+        printToColor("Zone markers visible.", sender.color, {0.4, 0.7, 1.0})
+        return false
     end
 
     -- Match "judge <question>" command
@@ -259,7 +459,7 @@ function onChat(message, sender)
     -- Check for API key
     local apiKey = PLAYER_KEYS[sender.color]
     if apiKey == nil or apiKey == "" then
-        printToColor("No API key set. Click the Judge Mat on the table to enter your Anthropic API key.", sender.color, {1, 0.3, 0.3})
+        printToColor("No API key set. Type 'judge setup' to enter your Anthropic API key.", sender.color, {1, 0.3, 0.3})
         return false
     end
 
