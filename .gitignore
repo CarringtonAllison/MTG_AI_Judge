@@ -6,3 +6,4 @@ data/*.db
 .env
 *.egg-info/
 venv/
+.claude/
