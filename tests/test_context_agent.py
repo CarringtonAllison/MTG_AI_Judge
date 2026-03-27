@@ -1,5 +1,5 @@
 import pytest
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 from models.schemas import ScryfallCard, RulesChunk, JudgeRequest, PlayerBoardState
 from agents.context_agent import extract_card_names, build_context
 
@@ -144,7 +144,6 @@ class TestBuildContext:
             mock_rules.return_value = [MagicMock() for _ in range(3)]
             mock_fallback.return_value = []
 
-            from unittest.mock import MagicMock
             request = JudgeRequest(
                 question="Does [[Questing Beast]] have trample?",
                 board_state={},
@@ -195,7 +194,7 @@ class TestBuildContext:
             mock_fallback.return_value = []
 
             request = JudgeRequest(
-                question="test",
+                question="How does trample damage work?",
                 board_state={},
                 life_totals={},
                 active_player="player1",
