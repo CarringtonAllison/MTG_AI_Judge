@@ -1,4 +1,4 @@
-app = "mtg-judge"
+app = "mtg-ai-judge-tts"
 primary_region = "ord"
 
 [build]
