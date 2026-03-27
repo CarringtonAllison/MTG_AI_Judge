@@ -1,0 +1,8 @@
+__pycache__/
+*.pyc
+.pytest_cache/
+data/comprehensive_rules.txt
+data/*.db
+.env
+*.egg-info/
+venv/
