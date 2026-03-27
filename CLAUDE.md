@@ -30,3 +30,4 @@ Do **not** include a `Co-Authored-By` trailer in commit messages.
 - Python path: `/c/Users/Rain_/AppData/Local/Programs/Python/Python312/python.exe`
 
 ## Lessons Learned
+- Windows-downloaded text files use `\r\n` line endings. Always normalize with `.replace("\r\n", "\n")` before regex parsing.
