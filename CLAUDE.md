@@ -17,8 +17,16 @@ Examples: `backend: add health endpoint`, `frontend: update status indicator`, `
 
 Do **not** include a `Co-Authored-By` trailer in commit messages.
 
+## Workflow
+- Always run tests before committing — never commit code that breaks existing tests
+- Build on top of existing features — never remove or replace functionality unless explicitly told to
+- Always ask for permission before pushing anything to GitHub
+- When a mistake is corrected mid-session, add the lesson as a rule in this file
+
 ## Project
 - Python 3.12, FastAPI, SQLite, Anthropic Claude API, Scryfall REST API
 - TDD: always write tests before implementation
 - Run tests with: `python -m pytest tests/ -v`
 - Python path: `/c/Users/Rain_/AppData/Local/Programs/Python/Python312/python.exe`
+
+## Lessons Learned
